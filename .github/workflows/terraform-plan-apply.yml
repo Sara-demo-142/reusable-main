@@ -34,12 +34,12 @@ on:
         type: number
       # Configuring Terraform backend with default IAM assume role for GitHub CICD
       tf_env_args:
-        default: '-backend-config="assume_role={role_arn=\"arn:aws:iam::653312621124:role/Terraform-State\"}"'
+        default: '-backend-config="assume_role={role_arn=\"arn:aws:iam::637423253820:role/Terraform-State\"}"'
         type: string
     secrets:
-      VIDA_CI_APP_ID:
+      APP_ID:
         required: true
-      VIDA_CI_APP_KEY:
+      APP_PRIVATE_KEY:
         required: true
     
 
@@ -47,8 +47,8 @@ jobs:
   plan:
     uses: ./.github/workflows/terraform-plan.yml
     secrets:
-      VIDA_CI_APP_ID: ${{ secrets.VIDA_CI_APP_ID }}
-      VIDA_CI_APP_KEY: ${{ secrets.VIDA_CI_APP_KEY }}
+      APP_ID: ${{ secrets.APP_ID }}
+      APP_PRIVATE_KEY: ${{ secrets.APP_PRIVATE_KEY }}
     with:
       terraform_version: ${{ inputs.terraform_version }}
       environment: ${{ inputs.environment }}
@@ -79,10 +79,10 @@ jobs:
     steps:
       - name: Generate GitHub App Token
         id: app-token
-        uses: actions/create-github-app-token@v1
+        uses: actions/create-github-app-token@v2
         with:
-          app-id: ${{ secrets.VIDA_CI_APP_ID }}
-          private-key: ${{ secrets.VIDA_CI_APP_KEY }}
+          app-id: ${{ secrets.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
           owner: VIDADiagnostics
           
       - name: Checkout

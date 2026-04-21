@@ -6,12 +6,17 @@ on:
     branches:
     - main
 
+permissions:
+  id-token: write
+  contents: read
+  pull-requests: write
+
 jobs:
   sandbox:
     uses: ./.github/workflows/terraform-plan.yml
     secrets:
-      VIDA_CI_APP_ID: ${{ secrets.VIDA_CI_APP_ID }}
-      VIDA_CI_APP_KEY: ${{ secrets.VIDA_CI_APP_KEY }}
+      APP_ID: ${{ secrets.APP_ID }}
+      APP_PRIVATE_KEY: ${{ secrets.APP_PRIVATE_KEY }}
     with:
       terraform_version: 1.6.1
       terraform_path: terraform-workflows-test
@@ -20,8 +25,8 @@ jobs:
   sdlc:
     uses: ./.github/workflows/terraform-plan.yml
     secrets:
-      VIDA_CI_APP_ID: ${{ secrets.VIDA_CI_APP_ID }}
-      VIDA_CI_APP_KEY: ${{ secrets.VIDA_CI_APP_KEY }}
+      APP_ID: ${{ secrets.APP_ID }}
+      APP_PRIVATE_KEY: ${{ secrets.APP_PRIVATE_KEY }}
     with:
       terraform_version: 1.6.1
       terraform_path: terraform-workflows-test
@@ -30,8 +35,8 @@ jobs:
   prod:
     uses: ./.github/workflows/terraform-plan.yml
     secrets:
-      VIDA_CI_APP_ID: ${{ secrets.VIDA_CI_APP_ID }}
-      VIDA_CI_APP_KEY: ${{ secrets.VIDA_CI_APP_KEY }}
+      APP_ID: ${{ secrets.APP_ID }}
+      APP_PRIVATE_KEY: ${{ secrets.APP_PRIVATE_KEY }}
     with:
       terraform_version: 1.6.1
       terraform_path: terraform-workflows-test
