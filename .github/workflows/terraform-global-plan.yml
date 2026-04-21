@@ -50,7 +50,7 @@ jobs:
     steps:
       - name: Generate GitHub App Token
         id: app-token
-        uses: actions/create-github-app-token@v1
+        uses: actions/create-github-app-token@v2
         with:
           app-id: ${{ secrets.APP_ID }}
           private-key: ${{ secrets.APP_PRIVATE_KEY }}
@@ -68,7 +68,7 @@ jobs:
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: arn:aws:iam::653312621124:role/terraform-admin
+          role-to-assume: arn:aws:iam::637423253820:role/terraform-admin
           role-session-name: terraform-ci
           aws-region: us-east-2
           mask-aws-account-id: 'no'
