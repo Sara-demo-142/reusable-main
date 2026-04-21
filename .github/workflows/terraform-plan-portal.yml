@@ -1,0 +1,160 @@
+name: Reusable Terraform plan job
+
+on:
+  workflow_call:
+    inputs:
+      terraform_version:
+        required: true
+        type: string
+      environment:
+        required: true
+        type: string
+      terraform_path:
+        default: "."
+        type: string
+      plan_args:
+        default: ""
+        type: string
+      build_agent:
+        default: "ubuntu-latest"
+        type: string
+      container:
+        type: string
+        required: false
+      additional_artifacts:
+        type: string
+        default: ""
+      deploy_branch:
+        required: false
+        default: ""
+        type: string
+      # Getting AWS environment account number from requested workflow trigger to pass into IAM roles
+      account_number:
+        required: false
+        type: number
+        # Configuring Terraform backend with default IAM assume role for GitHub CICD
+      tf_env_args:
+        default: '-backend-config="assume_role={role_arn=\"arn:aws:iam::653312621124:role/Terraform-State\"}"'
+        type: string
+      # Passing deployment version tag to terraform to pick right version of ECR image to deploy
+      deployment_version:
+        type: string
+        required: false
+    secrets:
+      VIDA_CI_APP_ID:
+        required: true
+      VIDA_CI_APP_KEY:
+        required: true
+
+jobs:
+  plan:
+    name: "Plan"
+    runs-on: ${{ inputs.build_agent }}
+    container: ${{ inputs.container }}
+    permissions:
+      id-token: write # This is required for requesting the JWT
+      contents: read
+    env:
+      TF_WORKSPACE: ${{ inputs.environment }}
+      TF_VAR_git_sha_long: ${{ inputs.deploy_branch == '' && github.sha || inputs.deploy_branch }}
+      TF_VAR_deployment_version: ${{inputs.deployment_version}}
+
+    steps:
+      - name: Generate GitHub App Token
+        id: app-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.VIDA_CI_APP_ID }}
+          private-key: ${{ secrets.VIDA_CI_APP_KEY }}
+          owner: VIDADiagnostics
+
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.deploy_branch }}
+      - name: Git Configure
+        # This is needed for installing internal private GitHub dependencies
+        run: |
+          git config --global url."https://x-access-token:${{ steps.app-token.outputs.token }}@github.com/".insteadOf "https://github.com/"
+
+      # This section uses to retrive environment account ID from terraform var file (prod.tfvars) if inputs contains plan_args
+      # This action is to eliminate passing static account_id variable
+
+      - name: Retrive account ID from tfVars
+        if: ${{inputs.plan_args != ''}}
+        run: |
+          account_id=$(echo $(sed -n 's/account_id *= *"\(.*\)"/{"account_id": \1}/p' vars/${{inputs.environment}}.tfvars) | python -c 'import json, sys; print(json.dumps(json.loads("".join([l for l in sys.stdin]))["account_id"]))')
+          echo "env_account_id=${account_id}" >> $GITHUB_ENV
+        shell: bash
+
+      # This section will run if aws environment account id is passing through inputs
+
+      - name: Configure accountID environments
+        if: ${{inputs.account_number}}
+        run: |
+          echo "env_account_id=${{inputs.account_number}}" >> $GITHUB_ENV
+
+      # In this section GitHubAction-ReadOnly OIDC role is configured to use read AWS resources from each environments.
+
+      - name: Configure OIDC ReadOnly AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4.0.2
+        with:
+          role-to-assume: arn:aws:iam::${{ env.env_account_id }}:role/GitHubAction-ReadOnly
+          role-session-name: terraform-ci
+          aws-region: us-east-2
+          mask-aws-account-id: "no"
+
+      - name: Setup Nodejs
+        uses: actions/setup-node@v4
+        with:
+          node-version: 16
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ inputs.terraform_version }}
+
+      - name: Terraform Format
+        id: fmt
+        run: |
+          cd ${{ inputs.terraform_path }}
+          terraform fmt -check -recursive
+
+      - name: Terraform Init
+        id: init
+        run: |
+          cd ${{ inputs.terraform_path }}
+          terraform init ${{inputs.tf_env_args}}
+
+      - name: Terraform Validate
+        id: validate
+        run: |
+          cd ${{ inputs.terraform_path }}
+          terraform validate -no-color
+
+      - name: Terraform Plan
+        id: plan
+        run: |
+          cd ${{ inputs.terraform_path }}
+          terraform plan -input=false -out tf.plan ${{ inputs.plan_args }} ${{ github.event_name == 'pull_request' && '-lock=false' || '' }}
+          terraform show -no-color tf.plan > tf.plan.stdout
+      - name: Archive Terraform plan
+        uses: actions/upload-artifact@v4
+        if: (github.event_name != 'pull_request') || (inputs.environment == 'sandbox' && (contains(github.event.comment.html_url, '/pull/') && contains(github.event.comment.body, '/deploy')))
+        with:
+          name: terraform-plan
+          path: ${{ inputs.terraform_path }}/tf.plan
+          retention-days: 30
+      - name: Archive additional artifacts
+        uses: actions/upload-artifact@v4
+        if: ((github.event_name != 'pull_request') || (inputs.environment == 'sandbox' && (contains(github.event.comment.html_url, '/pull/') && contains(github.event.comment.body, '/deploy')))) && inputs.additional_artifacts != ''
+        with:
+          name: additional-artifacts
+          path: ${{ inputs.additional_artifacts }}
+          retention-days: 30
+      - name: Archive Terraform plan output
+        uses: actions/upload-artifact@v4
+        if: github.event_name == 'pull_request'
+        with:
+          name: terraform-plan-stdout-${{ inputs.environment }}
+          path: ${{ inputs.terraform_path }}/tf.plan.stdout
+          retention-days: 1

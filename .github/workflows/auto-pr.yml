@@ -1,0 +1,361 @@
+name: Auto PR Workflow
+
+on:
+  workflow_call:
+    secrets:
+       APP_ID:
+        required: true
+       APP_PRIVATE_KEY:
+        required: true
+       VIDA_PR_APPROVAL:
+        required: true
+       VIDA_PR_APP_ID:
+        required: true
+
+jobs:
+  mptApproval:
+    name: "QA Approval for MPT deployment"
+    environment: Comment bump version as major / minor / patch
+    runs-on: ubuntu-latest
+    permissions:
+      #id-token: write
+      contents: write
+      actions: write
+      pull-requests: write
+
+    steps:
+      - name: Generate GitHub App Token
+        id: app-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets. APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Get Deployment Status and Comments
+        uses: actions/github-script@v7
+        id: get_comments
+        with:
+          github-token: ${{ steps.app-token.outputs.token }}
+          script: |
+            const runId = context.runId;
+            const run_data = await github.rest.actions.getReviewsForRun({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                run_id: runId
+            });
+            console.log(run_data);
+            const approval_data = run_data.data[0];
+            const state = approval_data.state;
+            const comment = approval_data.comment;
+            core.setOutput("comment", comment);
+            core.setOutput("state", state);
+
+      - name: Bump version and push tag
+        id: release_tag
+        uses: anothrNick/github-tag-action@v1
+        env:
+          GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
+          DRY_RUN: false
+          PRERELEASE: true
+          TAG_PREFIX: v
+          PRERELEASE_SUFFIX: mpt
+          RELEASE_BRANCHES: prod
+          DEFAULT_BUMP: ${{ contains(fromJSON('["patch", "minor", "major"]'), steps.get_comments.outputs.comment) && steps.get_comments.outputs.comment || 'patch'}}
+
+    outputs:
+      approval_comment: ${{ steps.get_comments.outputs.comment }}
+      approval_status: ${{ steps.get_comments.outputs.state }}
+      deployment_version: ${{ steps.release_tag.outputs.new_tag }}
+
+  mptPR:
+    needs:
+      - mptApproval
+    name: "Create PR for MPT"
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: write
+      actions: write
+      pull-requests: write
+
+    steps:
+      - name: Generate GitHub App Token
+        id: app-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets. APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+
+      - name: Create PR
+        if: ${{ needs.mptApproval.outputs.approval_status == 'approved' }}
+        uses: actions/github-script@v7
+        id: create-pr
+        with:
+          github-token: ${{ steps.app-token.outputs.token }}
+          script: |
+            const pr = await github.rest.pulls.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                base: "mpt",
+                head: "${{ github.ref_name }}",
+                title: 'Merge stage to mpt for pre production deployment ${{ needs.mptApproval.outputs.deployment_version }} #${{ needs.mptApproval.outputs.approval_comment }}',
+                body: 'Merge stage to mpt for pre production deployment ${{ needs.mptApproval.outputs.deployment_version }} #${{ needs.mptApproval.outputs.approval_comment }}'
+            });
+            core.setOutput("pr_number", pr.data.number);
+            core.setOutput("pr_url", pr.data.html_url);
+            core.setOutput("is_mergeable", pr.data.mergeable);
+            core.setOutput("pr_state", pr.data.state);
+            core.setOutput("head_sha", pr.data.head.sha);
+
+    outputs:
+      pr_number: ${{ steps.create-pr.outputs.pr_number }}
+      pr_url: ${{ steps.create-pr.outputs.pr_url }}
+      is_mergeable: ${{ steps.create-pr.outputs.is_mergeable }}
+      pr_state: ${{ steps.create-pr.outputs.pr_state }}
+      head_sha: ${{ steps.create-pr.outputs.head_sha }}
+
+  mptPlanCheck:
+    needs:
+      - mptPR
+    name: "MPT PR Plan Check"
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: write
+      actions: write
+      pull-requests: write
+
+    steps:
+      - name: Generate GitHub App Token
+        id: app-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets. APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: MPT PR Plan Check
+        uses: actions/github-script@v7
+        id: mpt-pr-plan-check
+        with:
+          github-token: ${{ steps.app-token.outputs.token }}
+          script: |
+            const { data: prs } = await github.rest.actions.listWorkflowRunsForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              head_sha: "${{ needs.mptPR.outputs.head_sha }}",
+              event: 'pull_request',
+              per_page: 1,
+            });
+
+            if (prs["total_count"] >= 1) {
+              async function waitForWorkflowCompletion(run_id, timeoutSec = 900, intervalSec = 5) {
+                const deadline = Date.now() + timeoutSec * 1000;
+                while (Date.now() < deadline) {
+                  const { data: run } = await github.rest.actions.getWorkflowRun({
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    run_id,
+                  });
+                  console.log(`Polling run ${run_id} → status: ${run.status}`);
+                  if (run.status === "completed") {
+                    console.log(`Run ${run_id} completed.`);
+                    return run;
+                  }
+                  await new Promise((resolve) => setTimeout(resolve, intervalSec * 1000));
+                }
+                throw new Error(`Workflow run ${run_id} did not complete within ${timeoutSec} seconds.`);
+              }
+
+              const run_id = prs.workflow_runs[0].id;
+              const completedRun = await waitForWorkflowCompletion(run_id);
+              console.log("Completed workflow run:", completedRun);
+              core.setOutput("workflow_status", completedRun.status);
+              core.setOutput("workflow_conclusion", completedRun.conclusion);
+            } else {
+              console.log("No workflow runs found for the given head SHA.");
+              core.setOutput("workflow_status", "no_workflow_found");
+              core.setOutput("workflow_conclusion", "no_workflow_found");
+            }
+
+    outputs:
+      workflow_status: ${{ steps.mpt-pr-plan-check.outputs.workflow_status }}
+      workflow_conclusion: ${{ steps.mpt-pr-plan-check.outputs.workflow_conclusion }}
+
+  mptPRApproval:
+    name: "Approval before merging MPT PR"
+    environment: Approve MPT PR
+    needs: [mptPR, mptPlanCheck]
+    runs-on: ubuntu-latest
+
+    steps:
+      - run: echo "Waiting for environment approval..."
+
+  mptPRMerge:
+    name: "MPT PR Merge"
+    environment: Merge PR (Approve PR Before using this)
+    needs:
+      - mptPR
+      - mptPlanCheck
+      - mptPRApproval
+    if: ${{ needs.mptPlanCheck.outputs.workflow_conclusion == 'success' }}
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: write
+      actions: write
+      pull-requests: write
+
+    steps:
+      - name: Generate GitHub App Token
+        id: app-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets. APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+
+      - name: Auto Approve PR
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ steps.approval-token.outputs.token }}
+          script: |
+            await github.rest.pulls.createReview({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: ${{ needs.mptPR.outputs.pr_number }},
+              event: "APPROVE"
+            });
+            
+      - name: Generate Merge App Token
+        id: merge-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets. APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+
+      - name: Merge PR
+        id: merge-pr
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ steps.merge-token.outputs.token }}
+          script: |
+            const merge = await github.rest.pulls.merge({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: ${{ needs.mptPR.outputs.pr_number }},
+              merge_method: "merge"
+            });
+
+            core.setOutput("pr_merged", merge.data.merged ? "true" : "false");
+
+      - name: Verify Merge
+        run: |
+          if [[ "${{ steps.merge-pr.outputs.pr_merged }}" != "true" ]]; then
+            echo "PR merge failed"
+            exit 1
+          else
+            echo "PR successfully merged"
+          fi
+
+    outputs:
+      pr_merged: ${{ steps.merge-pr.outputs.pr_merged }}
+    
+
+  prodApproval:
+    if: ${{ needs.mptPRMerge.outputs.pr_merged == 'true' }}
+    needs:
+      - mptPRMerge
+    name: "QA Approval for PROD deployment. Comment bump version as major / minor / patch"
+    environment: Comment bump version as major / minor / patch
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: write
+      actions: write
+      pull-requests: write
+
+    steps:
+      - name: Generate GitHub App Token
+        id: app-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets. APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Get Deployment Status and Comments
+        uses: actions/github-script@v7
+        id: get_comments
+        with:
+          github-token: ${{ steps.app-token.outputs.token }}
+          script: |
+            const runId = context.runId;
+            const run_data = await github.rest.actions.getReviewsForRun({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                run_id: runId
+            });
+            const approval_data = run_data.data[0];
+            const state = approval_data.state;
+            const comment = approval_data.comment;
+            core.setOutput("comment", comment);
+            core.setOutput("state", state);
+
+      - name: Bump version and push tag
+        id: release_tag
+        uses: anothrNick/github-tag-action@v1
+        env:
+          GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
+          DRY_RUN: false
+          PRERELEASE: true
+          TAG_PREFIX: v
+          PRERELEASE_SUFFIX: prod
+          RELEASE_BRANCHES: prod
+          DEFAULT_BUMP: ${{ contains(fromJSON('["patch", "minor", "major"]'), steps.get_comments.outputs.comment) && steps.get_comments.outputs.comment || 'patch'}}
+
+    outputs:
+      approval_comment: ${{ steps.get_comments.outputs.comment }}
+      approval_status: ${{ steps.get_comments.outputs.state }}
+      deployment_version: ${{ steps.release_tag.outputs.new_tag }}
+
+  prod_pr:
+    needs:
+      - prodApproval
+    name: "Create PR for Prod"
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: write
+      actions: write
+      pull-requests: write
+
+    steps:
+      - name: Generate GitHub App Token
+        id: app-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets. APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+
+      - name: Create PR
+        if: ${{ needs.prodApproval.outputs.approval_status == 'approved' }}
+        uses: actions/github-script@v7
+        id: create-pr
+        with:
+          github-token: ${{ steps.app-token.outputs.token }}
+          script: |
+            await github.rest.pulls.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              base: "prod",
+              head: "mpt",
+              title: 'Merge mpt to prod for production deployment ${{ needs.prodApproval.outputs.deployment_version }} #${{ needs.prodApproval.outputs.approval_comment }}',
+              body: 'Merge mpt to prod for production deployment ${{ needs.prodApproval.outputs.deployment_version }} #${{ needs.prodApproval.outputs.approval_comment }}'
+            });

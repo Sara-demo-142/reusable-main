@@ -1,0 +1,155 @@
+name: Reusable Terraform plan/apply jobs
+
+on:
+  workflow_call:
+    inputs:
+      terraform_version:
+        required: true
+        type: string
+      environment:
+        required: true
+        type: string
+      terraform_path:
+        default: "."
+        type: string
+      plan_args:
+        default: ""
+        type: string
+      build_agent:
+        default: "ubuntu-latest"
+        type: string
+      container:
+        type: string
+        required: false
+      additional_artifacts:
+        type: string
+        default: ""
+      deploy_branch:
+        required: false
+        default: ""
+        type: string
+      # Getting AWS environment account number from requested workflow trigger to pass into IAM roles
+      account_number:
+        required: false
+        type: number
+      # Configuring Terraform backend with default IAM assume role for GitHub CICD
+      tf_env_args:
+        default: '-backend-config="assume_role={role_arn=\"arn:aws:iam::653312621124:role/Terraform-State\"}"'
+        type: string
+    secrets:
+      VIDA_CI_APP_ID:
+        required: true
+      VIDA_CI_APP_KEY:
+        required: true
+    
+
+jobs:
+  plan:
+    uses: ./.github/workflows/terraform-plan.yml
+    secrets:
+      VIDA_CI_APP_ID: ${{ secrets.VIDA_CI_APP_ID }}
+      VIDA_CI_APP_KEY: ${{ secrets.VIDA_CI_APP_KEY }}
+    with:
+      terraform_version: ${{ inputs.terraform_version }}
+      environment: ${{ inputs.environment }}
+      terraform_path: ${{ inputs.terraform_path }}
+      plan_args: ${{ inputs.plan_args }}
+      build_agent: ${{ inputs.build_agent }}
+      container: ${{ inputs.container }}
+      additional_artifacts: ${{ inputs.additional_artifacts }}
+      deploy_branch: ${{ inputs.deploy_branch }}
+      account_number: ${{ inputs.account_number }} # Passing account_number variable to Terraform plan workflow
+      tf_env_args: ${{ inputs.tf_env_args }} # Passing default IAM assume role for GitHub CICD
+
+  apply:
+    name: "Apply"
+    needs: plan
+    environment: ${{ inputs.environment }}
+    concurrency:
+      group: ${{ inputs.environment }}
+      cancel-in-progress: true
+    runs-on: ${{ inputs.build_agent }}
+    container: ${{ inputs.container }}
+    permissions:
+      id-token: write # This is required for requesting the JWT
+      contents: read
+    env:
+      TF_WORKSPACE: ${{ inputs.environment }}
+      TF_VAR_git_sha_long: ${{ inputs.deploy_branch == '' && github.sha || inputs.deploy_branch }}
+    steps:
+      - name: Generate GitHub App Token
+        id: app-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.VIDA_CI_APP_ID }}
+          private-key: ${{ secrets.VIDA_CI_APP_KEY }}
+          owner: VIDADiagnostics
+          
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.deploy_branch }}
+      - name: Git Configure
+        # This is needed for installing internal private GitHub dependencies
+        run: |
+          git config --global url."https://x-access-token:${{ steps.app-token.outputs.token }}@github.com/".insteadOf "https://github.com/"
+
+      # This section uses to retrive environment account ID from terraform var file (prod.tfvars) if inputs contains plan_args
+      # This action is to eliminate passing static account_id variable
+
+      - name: Retrive account ID from tfVars
+        if: ${{inputs.plan_args != ''}}
+        run: |
+          account_id=$(echo $(sed -n 's/account_id *= *"\(.*\)"/{"account_id": \1}/p' vars/${{inputs.environment}}.tfvars) | python -c 'import json, sys; print(json.dumps(json.loads("".join([l for l in sys.stdin]))["account_id"]))')
+          echo "env_account_id=${account_id}" >> $GITHUB_ENV
+        shell: bash
+
+      # This section will run if aws environment account id is passing through inputs
+
+      - name: Configure accountID environments
+        if: ${{inputs.account_number}}
+        run: |
+          echo "env_account_id=${{inputs.account_number}}" >> $GITHUB_ENV
+
+      # In this section GitHubAction-Admin OIDC role is configured to use create and modify AWS resources from each environments.
+
+      - name: Configure OIDC Admin AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4.0.2
+        with:
+          role-to-assume: arn:aws:iam::${{ env.env_account_id }}:role/GitHubAction-Admin
+          role-session-name: terraform-ci
+          aws-region: us-east-2
+          mask-aws-account-id: "no"
+
+      - name: Get Terraform Plan File
+        uses: actions/download-artifact@v4
+        with:
+          name: terraform-plan
+          path: ${{ inputs.terraform_path }}
+
+      - name: Get additional artifacts
+        if: inputs.additional_artifacts != ''
+        uses: actions/download-artifact@v4
+        with:
+          name: additional-artifacts
+
+      - name: Setup Nodejs
+        uses: actions/setup-node@v4
+        if: inputs.container != ''
+        with:
+          node-version: 16
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ inputs.terraform_version }}
+
+      - name: Terraform Init
+        id: init
+        run: |
+          cd ${{ inputs.terraform_path }}
+          terraform init ${{inputs.tf_env_args}}
+
+      - name: Terraform Apply
+        run: |
+          cd ${{ inputs.terraform_path }}
+          terraform apply -input=false tf.plan

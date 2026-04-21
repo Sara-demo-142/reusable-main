@@ -1,0 +1,129 @@
+
+name: Reusable Terraform plan for Global Infrastructure jobs
+
+on:
+  workflow_call:
+    inputs:
+      terraform_version:
+        required: true
+        type: string
+      environment:
+        required: true
+        type: string
+      terraform_path:
+        default: '.'
+        type: string
+      plan_args:
+        default: ''
+        type: string
+      build_agent:
+        default: 'ubuntu-latest'
+        type: string
+      container:
+        type: string
+        required: false
+      additional_artifacts:
+        type: string
+        default: ''
+      deploy_branch:
+        required: false
+        default: ''
+        type: string
+    secrets:
+      VIDA_CI_APP_ID:
+        required: true
+      VIDA_CI_APP_KEY:
+        required: true
+
+jobs:
+  plan:
+    name: "Plan"
+    runs-on: ${{ inputs.build_agent }}
+    container: ${{ inputs.container }}
+    permissions:
+      id-token: write # This is required for requesting the JWT
+      contents: read
+    env:
+      TF_WORKSPACE: ${{ inputs.environment }}
+      TF_VAR_git_sha_long: ${{ inputs.deploy_branch == '' && github.sha || inputs.deploy_branch }}
+      
+    steps:
+      - name: Generate GitHub App Token
+        id: app-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.VIDA_CI_APP_ID }}
+          private-key: ${{ secrets.VIDA_CI_APP_KEY }}
+          owner: VIDADiagnostics
+
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.deploy_branch }}
+      - name: Git Configure
+        # This is needed for installing internal private GitHub dependencies
+        run: |
+          git config --global url."https://x-access-token:${{ steps.app-token.outputs.token }}@github.com/".insteadOf "https://github.com/"
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::653312621124:role/terraform-admin
+          role-session-name: terraform-ci
+          aws-region: us-east-2
+          mask-aws-account-id: 'no'
+
+      - name: Setup Nodejs
+        uses: actions/setup-node@v4
+        with:
+          node-version: 16
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ inputs.terraform_version }}
+
+      - name: Terraform Format
+        id: fmt
+        run: |
+          cd ${{ inputs.terraform_path }}
+          terraform fmt -check -recursive
+
+      - name: Terraform Init
+        id: init
+        run: |
+          cd ${{ inputs.terraform_path }}
+          terraform init
+
+      - name: Terraform Validate
+        id: validate
+        run: |
+          cd ${{ inputs.terraform_path }}
+          terraform validate -no-color
+
+      - name: Terraform Plan
+        id: plan
+        run: |
+          cd ${{ inputs.terraform_path }}
+          terraform plan -input=false -out tf.plan ${{ inputs.plan_args }} ${{ github.event_name == 'pull_request' && '-lock=false' || '' }}
+          terraform show -no-color tf.plan > tf.plan.stdout
+      - name: Archive Terraform plan
+        uses: actions/upload-artifact@v4
+        if: (github.event_name != 'pull_request') || (inputs.environment == 'sandbox' && (contains(github.event.comment.html_url, '/pull/') && contains(github.event.comment.body, '/deploy')))
+        with:
+          name: terraform-plan
+          path: ${{ inputs.terraform_path }}/tf.plan
+          retention-days: 30
+      - name: Archive additional artifacts
+        uses: actions/upload-artifact@v4
+        if: ((github.event_name != 'pull_request') || (inputs.environment == 'sandbox' && (contains(github.event.comment.html_url, '/pull/') && contains(github.event.comment.body, '/deploy')))) && inputs.additional_artifacts != ''
+        with:
+          name: additional-artifacts
+          path: ${{ inputs.additional_artifacts }}
+          retention-days: 30
+      - name: Archive Terraform plan output
+        uses: actions/upload-artifact@v4
+        if: github.event_name == 'pull_request'
+        with:
+          name: terraform-plan-stdout-${{ inputs.environment }}
+          path: ${{ inputs.terraform_path }}/tf.plan.stdout
+          retention-days: 1

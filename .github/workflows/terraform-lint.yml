@@ -1,0 +1,72 @@
+name: Reusable Terraform Lint
+
+on:
+  workflow_call:
+    inputs:
+      build_agent:
+        default: 'ubuntu-latest'
+        type: string
+      container:
+        type: string
+        required: false
+      deploy_branch:
+        required: false
+        default: ''
+        type: string
+    secrets:
+      VIDA_CI_APP_ID:
+        required: true
+      VIDA_CI_APP_KEY:
+        required: true
+
+jobs:
+  test:
+    name: "Lint Test"
+    runs-on: ${{ inputs.build_agent }}
+    container: ${{ inputs.container }}
+    permissions:
+      id-token: write # This is required for requesting the JWT
+      contents: read
+    env:
+      TF_VAR_git_sha_long: ${{ inputs.deploy_branch == '' && github.sha || inputs.deploy_branch }}
+      
+    steps:
+      - name: Generate GitHub App Token
+        id: app-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.VIDA_CI_APP_ID }}
+          private-key: ${{ secrets.VIDA_CI_APP_KEY }}
+          owner: VIDADiagnostics
+
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.deploy_branch }}
+          
+      - name: Git Configure
+        # This is needed for installing internal private GitHub dependencies
+        run: |
+          git config --global url."https://x-access-token:${{ steps.app-token.outputs.token }}@github.com/".insteadOf "https://github.com/"
+      
+      - uses: actions/cache@v4
+        name: Cache plugin dir
+        with:
+          path: ~/.tflint.d/plugins
+          key: ${{ inputs.build_agent }}-tflint-${{ hashFiles('.tflint.hcl') }}
+        
+      - uses: terraform-linters/setup-tflint@v4
+        name: Setup TFLint
+        with:
+          tflint_version: latest
+
+      - name: Show version
+        run: tflint --version
+
+      - name: Init TFLint
+        run: tflint --init
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+
+      - name: Run TFLint
+        run: tflint --recursive --minimum-failure-severity=error -f compact

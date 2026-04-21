@@ -1,0 +1,30 @@
+name: Test Terraform Hotfix Workflow
+
+on:
+  workflow_dispatch: {}
+  push:
+    branches:
+    - 'hotfix/**'
+
+jobs:
+  sdlc:
+    uses: ./.github/workflows/terraform-plan-apply.yml
+    secrets:
+      VIDA_CI_APP_ID: ${{ secrets.VIDA_CI_APP_ID }}
+      VIDA_CI_APP_KEY: ${{ secrets.VIDA_CI_APP_KEY }}
+    with:
+      terraform_version: 1.6.1
+      terraform_path: terraform-workflows-test
+      environment: sdlc
+      account_number: 139383360831
+  prod:
+    uses: ./.github/workflows/terraform-plan-apply.yml
+    secrets:
+      VIDA_CI_APP_ID: ${{ secrets.VIDA_CI_APP_ID }}
+      VIDA_CI_APP_KEY: ${{ secrets.VIDA_CI_APP_KEY }}
+    needs: sdlc
+    with:
+      terraform_version: 1.6.1
+      terraform_path: terraform-workflows-test
+      environment: prod
+      account_number: 162850226511

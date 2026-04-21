@@ -1,0 +1,80 @@
+name: Reusable Terraform job to publish plans as a comment on PR
+
+on:
+  workflow_call:
+    inputs:
+      environments:
+        default: ''
+        type: string
+        description: Comma-separated list of environments
+
+jobs:
+  pr-comment:
+    name: Update Pull Request
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+    steps:
+    - uses: actions/download-artifact@v4.1.8
+      with:
+        path: ./artifacts
+        pattern: terraform-plan-stdout-*
+
+    - name: Generate PR comment
+      id: generate-comment
+      if: github.event_name == 'pull_request'
+      uses: actions/github-script@v7
+      env:
+        ENVIRONMENTS: ${{ inputs.environments }}
+      with:
+        result-encoding: string
+        script: |
+          output = ''
+          environments = process.env.ENVIRONMENTS.split(',')
+          for (const i in environments) {
+              environment_name = environments[i]
+              const fs = require('fs')
+              const raw_plan = fs.readFileSync(`./artifacts/terraform-plan-stdout-${environment_name}/tf.plan.stdout`)
+              const lines = raw_plan.toString().split('\n')
+              var concise_lines = []
+              lines.forEach((line) => {
+                if (/^  # .*will be/.test(line) || /^Plan: /.test(line) || /^No changes./.test(line)) {
+                  concise_lines.push(line)
+                }
+              })
+              const plan = concise_lines.join('\n')
+
+              output = output + `
+
+          <details><summary>Show Plan - workspace ${ environment_name }</summary>
+
+          \`\`\`\n
+          ${ plan }
+          \`\`\`
+
+          </details>
+              `;
+          }
+
+          return output
+
+
+    - name: Find Comment
+      if: github.event_name == 'pull_request'
+      uses: peter-evans/find-comment@v3
+      id: find-existing-comment
+      with:
+        issue-number: ${{ github.event.pull_request.number }}
+        comment-author: 'github-actions[bot]'
+        body-includes: Terraform Plans
+
+    - name: Create or update comment
+      if: github.event_name == 'pull_request'
+      uses: peter-evans/create-or-update-comment@v3
+      with:
+        comment-id: ${{ steps.find-existing-comment.outputs.comment-id }}
+        issue-number: ${{ github.event.pull_request.number }}
+        body: |
+          #### Terraform Plans
+          ${{ steps.generate-comment.outputs.result }}
+        edit-mode: replace
