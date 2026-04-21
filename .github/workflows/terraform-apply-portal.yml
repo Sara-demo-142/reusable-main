@@ -41,9 +41,9 @@ on:
         type: string
         required: false
     secrets:
-      VIDA_CI_APP_ID:
+      APP_ID:
         required: true
-      VIDA_CI_APP_KEY:
+      APP_PRIVATE_KEY:
         required: true
 
 jobs:
@@ -67,8 +67,8 @@ jobs:
         id: app-token
         uses: actions/create-github-app-token@v1
         with:
-          app-id: ${{ secrets.VIDA_CI_APP_ID }}
-          private-key: ${{ secrets.VIDA_CI_APP_KEY }}
+          app-id: ${{ secrets.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
           owner: VIDADiagnostics
 
       - name: Checkout
